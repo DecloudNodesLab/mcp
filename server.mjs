@@ -38,10 +38,6 @@ function safeResolve(relativePath = ".") {
   return resolved;
 }
 
-async function ensureDirectory(dirPath) {
-  await fs.mkdir(dirPath, { recursive: true });
-}
-
 async function fileExists(filePath) {
   try {
     await fs.access(filePath);
@@ -57,26 +53,19 @@ function jsonText(value) {
 
 function createServer() {
   const server = new McpServer(
+    { name: "workspace-mcp", version: "1.0.0" },
     {
-      name: "workspace-mcp",
-      version: "1.0.0"
-    },
-    {
-      capabilities: {
-        logging: {}
-      },
+      capabilities: { logging: {} },
       instructions:
-        "Этот MCP-сервер работает только внутри /workspace. " +
-        "Файлы читать и писать только там. Команды выполнять только через run_cmd."
+        "Этот сервер работает только внутри /workspace. " +
+        "Читай и пиши файлы только там. Команды запускай только через run_cmd."
     }
   );
 
   server.tool(
     "pwd_ls",
-    "Показать текущую папку и список файлов внутри /workspace",
-    {
-      path: z.string().optional().describe("Относительный путь внутри /workspace")
-    },
+    "Показать папку и список файлов внутри /workspace",
+    { path: z.string().optional() },
     async ({ path: relativePath }) => {
       try {
         const target = safeResolve(relativePath || ".");
@@ -115,9 +104,7 @@ function createServer() {
   server.tool(
     "read_file",
     "Прочитать текстовый файл внутри /workspace",
-    {
-      path: z.string().describe("Относительный путь к файлу внутри /workspace")
-    },
+    { path: z.string() },
     async ({ path: relativePath }) => {
       try {
         const filePath = safeResolve(relativePath);
@@ -133,20 +120,12 @@ function createServer() {
         if (stat.size > MAX_READ_BYTES) {
           return {
             isError: true,
-            content: [
-              {
-                type: "text",
-                text: `Файл слишком большой: ${stat.size} байт. Увеличь MAX_READ_BYTES.`
-              }
-            ]
+            content: [{ type: "text", text: `Файл слишком большой: ${stat.size} байт.` }]
           };
         }
 
         const content = await fs.readFile(filePath, "utf8");
-
-        return {
-          content: [{ type: "text", text: content }]
-        };
+        return { content: [{ type: "text", text: content }] };
       } catch (error) {
         return {
           isError: true,
@@ -160,9 +139,9 @@ function createServer() {
     "write_file",
     "Создать или перезаписать текстовый файл внутри /workspace",
     {
-      path: z.string().describe("Относительный путь к файлу внутри /workspace"),
-      content: z.string().describe("Новое содержимое файла"),
-      overwrite: z.boolean().default(true).describe("Разрешить перезапись существующего файла")
+      path: z.string(),
+      content: z.string(),
+      overwrite: z.boolean().default(true)
     },
     async ({ path: relativePath, content, overwrite }) => {
       try {
@@ -176,7 +155,7 @@ function createServer() {
           };
         }
 
-        await ensureDirectory(path.dirname(filePath));
+        await fs.mkdir(path.dirname(filePath), { recursive: true });
         await fs.writeFile(filePath, content, "utf8");
 
         return {
@@ -199,36 +178,21 @@ function createServer() {
     "run_cmd",
     "Запустить разрешённую команду без shell внутри /workspace",
     {
-      program: z.string().describe("Имя программы, например git или npm"),
-      args: z.array(z.string()).default([]).describe("Аргументы программы"),
-      cwd: z.string().optional().describe("Относительный рабочий каталог внутри /workspace"),
-      timeoutSec: z.number().int().min(1).max(120).default(30).describe("Таймаут в секундах")
+      program: z.string(),
+      args: z.array(z.string()).default([]),
+      cwd: z.string().optional(),
+      timeoutSec: z.number().int().min(1).max(120).default(30)
     },
     async ({ program, args, cwd, timeoutSec }) => {
       try {
         if (!ALLOWED_PROGRAMS.has(program)) {
           return {
             isError: true,
-            content: [
-              {
-                type: "text",
-                text: `Программа "${program}" не разрешена. Разрешены: ${[
-                  ...ALLOWED_PROGRAMS
-                ].join(", ")}`
-              }
-            ]
+            content: [{ type: "text", text: `Программа "${program}" не разрешена.` }]
           };
         }
 
         const targetCwd = safeResolve(cwd || ".");
-        const stat = await fs.stat(targetCwd);
-        if (!stat.isDirectory()) {
-          return {
-            isError: true,
-            content: [{ type: "text", text: "cwd не является директорией." }]
-          };
-        }
-
         const { stdout, stderr } = await execFileAsync(program, args, {
           cwd: targetCwd,
           timeout: timeoutSec * 1000,
@@ -296,8 +260,7 @@ async function requireBearerAuth(req, res, next) {
 
       if (!audOk && !azpOk) {
         return res.status(403).json({
-          error: "Токен не предназначен для этого клиента",
-          expectedAudience: OIDC_EXPECTED_AUDIENCE
+          error: "Токен не предназначен для этого клиента"
         });
       }
     }
@@ -318,23 +281,15 @@ async function requireBearerAuth(req, res, next) {
 }
 
 const app = express();
-
 app.use(express.json({ limit: "1mb" }));
-app.use(
-  cors({
-    origin: "*",
-    exposedHeaders: ["Mcp-Session-Id"]
-  })
-);
+app.use(cors({ origin: "*", exposedHeaders: ["Mcp-Session-Id"] }));
 
 app.get("/healthz", (req, res) => {
   res.json({
     ok: true,
     name: "workspace-mcp",
     workspaceRoot: WORKSPACE_ROOT,
-    oidcIssuer: OIDC_ISSUER,
-    audienceCheckEnabled: Boolean(OIDC_EXPECTED_AUDIENCE),
-    allowedPrograms: [...ALLOWED_PROGRAMS]
+    oidcIssuer: OIDC_ISSUER
   });
 });
 
@@ -353,30 +308,16 @@ app.post("/mcp", requireBearerAuth, async (req, res) => {
       server.close().catch(() => {});
     });
   } catch (error) {
-    console.error("MCP error:", error);
     if (!res.headersSent) {
       res.status(500).json({
         jsonrpc: "2.0",
-        error: {
-          code: -32603,
-          message: "Internal server error"
-        },
+        error: { code: -32603, message: "Internal server error" },
         id: null
       });
     }
   }
 });
 
-app.get("/mcp", (req, res) => {
-  res.status(405).set("Allow", "POST").send("Method Not Allowed");
-});
-
-app.delete("/mcp", (req, res) => {
-  res.status(405).set("Allow", "POST").send("Method Not Allowed");
-});
-
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`workspace-mcp listening on 0.0.0.0:${PORT}`);
-  console.log(`workspace root: ${WORKSPACE_ROOT}`);
-  console.log(`allowed programs: ${[...ALLOWED_PROGRAMS].join(", ")}`);
 });
